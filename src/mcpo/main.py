@@ -207,17 +207,16 @@ def validate_server_config(server_name: str, server_cfg: Dict[str, Any]) -> None
     else:
         raise ValueError(f"Server '{server_name}' must have either 'command' for stdio or 'type' and 'url' for remote servers")
     
-    # Validate disabledTools
-    disabled_tools = server_cfg.get("disabled_tools")
+    # Validate disabledTools (supports camelCase & snake_case for backwards compatibility)
+    disabled_tools = server_cfg.get("disabledTools")
+    if disabled_tools is None:
+        disabled_tools = server_cfg.get("disabled_tools")
     if disabled_tools is not None:
         if not isinstance(disabled_tools, list):
             raise ValueError(f"Server '{server_name}' 'disabledTools' must be a list")
         for tool_name in disabled_tools:
             if not isinstance(tool_name, str):
                 raise ValueError(f"Server '{server_name}' 'disabledTools' must contain only strings")
-        raise ValueError(
-            f"Server '{server_name}' must have either 'command' for stdio or 'type' and 'url' for remote servers"
-        )
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -311,8 +310,11 @@ def create_sub_app(
     sub_app.state.api_dependency = api_dependency
     sub_app.state.connection_timeout = connection_timeout
 
-    # Store list of tools to be disabled, if present
-    sub_app.state.disabled_tools = server_cfg.get("disabled_tools", [])
+    # Store list of tools to be disabled, if present (accept both key styles)
+    disabled_tools = server_cfg.get("disabledTools")
+    if disabled_tools is None:
+        disabled_tools = server_cfg.get("disabled_tools", [])
+    sub_app.state.disabled_tools = disabled_tools
 
     
     # Store client header forwarding configuration
@@ -440,12 +442,20 @@ async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, An
                     )
                     main_app.mount(f"{path_prefix}{server_name}", sub_app)
 
-                    # Start the lifespan for the new sub-app
-                    lifespan_context = sub_app.router.lifespan_context(sub_app)
-                    await lifespan_context.__aenter__()
-
-                    # Store the context manager for cleanup later
-                    main_app.state.active_lifespans[server_name] = lifespan_context
+                    # Start the lifespan for the new sub-app when available
+                    lifespan_context = None
+                    lifespan_factory = getattr(sub_app.router, "lifespan_context", None)
+                    if lifespan_factory:
+                        lifespan_context = lifespan_factory(sub_app)
+                    if lifespan_context and hasattr(lifespan_context, "__aenter__"):
+                        await lifespan_context.__aenter__()
+                        # Store the context manager for cleanup later
+                        main_app.state.active_lifespans[server_name] = lifespan_context
+                    else:
+                        logger.debug(
+                            "Skipping lifespan startup for server '%s' (no async context manager)",
+                            server_name,
+                        )
 
                     # Check if connection was successful
                     is_connected = getattr(sub_app.state, "is_connected", False)
