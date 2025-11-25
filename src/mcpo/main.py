@@ -468,6 +468,11 @@ async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, An
                             f"Failed to connect to new server: '{server_name}'"
                         )
 
+                except asyncio.CancelledError as e:
+                    logger.error(f"Failed to create server '{server_name}' (cancelled): {e}")
+                    # Rollback on failure
+                    main_app.router.routes = backup_routes
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to create server '{server_name}': {e}")
                     # Rollback on failure
@@ -609,6 +614,14 @@ async def lifespan(app: FastAPI):
                             f"Connection attempt for '{server_name}' finished, but status is not 'connected'."
                         )
                         failed_servers.append(server_name)
+                except asyncio.CancelledError as e:
+                    if shutdown_handler and shutdown_handler.shutdown_event.is_set():
+                        raise
+                    logger.error(
+                        f"Failed to establish connection for server: '{server_name}' - CancelledError: {e}",
+                        exc_info=True,
+                    )
+                    failed_servers.append(server_name)
                 except Exception as e:
                     error_class_name = type(e).__name__
                     if error_class_name == "ExceptionGroup" or (
